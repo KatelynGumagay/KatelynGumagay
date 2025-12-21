@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+body {
+  margin: 0;
+  background-color: var(--background);
+  color: var(--foreground);
+  overflow: hidden;
+}
+
+/* =======================
+   VIEWPORT (CAMERA)
+======================= */
+
+.viewport {
+  width: 100vw;
+  height: 100vh;
+  touch-action: pan-y;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+/* =======================
+   TRACK (WORLD)
+======================= */
+
+.track {
+  display: flex;
+  will-change: transform;
+  gap: 30px;
+}
+
+/* =======================
+   PANEL (CARD)
+======================= */
+
+.panel {
+  width: 280px;
+  height: 500px;
+  flex-shrink: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background-color: violet;
+  border-radius: 12px;
+  font-size: 1rem;
+}
+
+
+
+/*
+.panel {
+  outline: 2px solid red;
+}
+
+.panel:nth-child(-n+2),
+.panel:nth-last-child(-n+2) {
+  background-color: gold;
+}
+*/
