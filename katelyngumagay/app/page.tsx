@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /* =======================
    DATA
@@ -33,245 +33,326 @@ const rightBuffer = PANELS.slice(0, BUFFER_COUNT);
 const RENDERED_PANELS = [...leftBuffer, ...PANELS, ...rightBuffer];
 
 export default function Home() {
+  const [centerIndex, setCenterIndex] = useState<number>(0);
+  const [openIndex, setOpenIndex] = useState<number | null>(null);
+
+
+
+  // ✅ NEW: ref to avoid stale resize issues
+  const centerIndexRef = useRef<number>(0);
+  const openIndexRef = useRef<number | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  
 
   useEffect(() => {
     const viewport = viewportRef.current;
     const track = trackRef.current;
+    openIndexRef.current = openIndex;
     if (!viewport || !track) return;
 
     /* =======================
        DIMENSIONS
     ======================= */
+
     const realCount = PANELS.length;
     const realWidth = realCount * FULL;
     const bufferWidth = BUFFER_COUNT * FULL;
-    const viewportWidth = viewport.clientWidth;
 
     /* =======================
        STATE
     ======================= */
+
     let position = bufferWidth;
-    let isDragging = false;
-    let startX = 0;
-    let lastX = 0;
 
     const applyTransform = () => {
       track.style.transform = `translateX(${-position}px)`;
     };
+
+    const centerToIndex = (index: number, animate = false) => {
+      const vw = viewport.clientWidth;
+
+      track.style.transition = animate ? "transform 0.4s ease" : "none";
+
+      position =
+        bufferWidth +
+        index * FULL -
+        vw / 2 +
+        FULL / 2 -
+        GAP / 2;
+
+      applyTransform();
+    };
+
+    /* =======================
+       INIT
+    ======================= */
+
+    if (centerIndexRef.current === null) {
+      centerToIndex(0, false);
+      centerIndexRef.current = 0;
+    }
 
     applyTransform();
 
     /* =======================
        LOOP CORRECTION
     ======================= */
-    const TELEPORT_MARGIN = viewportWidth / 2;
+
+    const TELEPORT_MARGIN = viewport.clientWidth / 2;
+
     const correctLoop = () => {
-      // too far left — jump forward without animation
       if (position < bufferWidth - TELEPORT_MARGIN) {
-        track.style.transition = "none"; // disable animation
+        track.style.transition = "none";
         position += realWidth;
         applyTransform();
-        // force reflow to make sure next animation works
         track.getBoundingClientRect();
-        track.style.transition = "transform 0.3s ease";
-      }
-
-      // too far right — jump backward without animation
-      else if (position > bufferWidth + realWidth - TELEPORT_MARGIN) {
-        track.style.transition = "none"; // disable animation
+      } else if (position > bufferWidth + realWidth - TELEPORT_MARGIN) {
+        track.style.transition = "none";
         position -= realWidth;
         applyTransform();
         track.getBoundingClientRect();
-        track.style.transition = "transform 0.3s ease";
       }
     };
 
-
     /* =======================
-       SNAP TO CENTER
+       SNAP
     ======================= */
+
     const snapToClosest = () => {
-      track.style.transition = "transform 0.3s ease";
-
-      // Get current viewport width dynamically
-      const currentViewportWidth = viewport.clientWidth;
-
-      // Bias for easier left swipes
-      const SNAP_BIAS = 0.5 * FULL;
-
-      // Compute center based on current width
-      const center = position + currentViewportWidth / 2 - bufferWidth - SNAP_BIAS;
-
+      const vw = viewport.clientWidth;
+      const center = position + vw / 2 - bufferWidth;
       const index = Math.round(center / FULL);
 
-      position = bufferWidth + index * FULL - currentViewportWidth / 2 + FULL / 2 - GAP / 2;
-      applyTransform();
+      centerToIndex(index, true);
+
+      setCenterIndex(index);
+      centerIndexRef.current = index;
 
       setTimeout(() => {
         track.style.transition = "none";
       }, 300);
     };
 
-
-
     /* =======================
-       WHEEL SCROLL
+       MOMENTUM
     ======================= */
 
-    const wrapPosition = () => {
-      const totalWidth = PANELS.length * FULL;
-      if (position < 0) position += totalWidth;
-      else if (position > totalWidth) position -= totalWidth;
+    let isMoving = false;
+    let velocity = 0;
+    let rafId: number | null = null;
+
+    const FRICTION = 0.92;
+    const MIN_VELOCITY = 0.1;
+
+    const animate = () => {
+
+      track.style.transition = "none";
+      position += velocity;
+      velocity *= FRICTION;
+
+      correctLoop();
+      applyTransform();
+
+      if (Math.abs(velocity) > MIN_VELOCITY) {
+        rafId = requestAnimationFrame(animate);
+      } else {
+        velocity = 0;
+        rafId = null;
+        isMoving = false;
+        snapToClosest();
+      }
     };
 
-    let wheelVelocity = 0;
+    const kick = () => {
+      if (!rafId) {
+        isMoving = true;
+        setOpenIndex(null); // 🔑 close overlay ONCE
+        rafId = requestAnimationFrame(animate);
+      }
+    };
+
+    /* =======================
+       WHEEL
+    ======================= */
+
     let wheelTimeout: NodeJS.Timeout | null = null;
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
 
-      // Trackpad friendly
       let delta = e.deltaY;
       if (e.deltaMode === 1) delta *= 20;
       if (e.deltaMode === 2) delta *= 200;
 
-      // Accelerate based on wheel velocity
-      wheelVelocity += delta * 0.1;
+      velocity += delta * 0.12;
+      kick();
 
-      // Apply velocity
-      position += wheelVelocity;
-
-      wrapPosition();
-      applyTransform();
-
-      // Slowly decay velocity for smooth glide
-      wheelVelocity *= 0.9;
-
-      // Reset snap timer
       if (wheelTimeout) clearTimeout(wheelTimeout);
       wheelTimeout = setTimeout(() => {
-        snapToClosest();
-        wheelVelocity = 0;
-      }, 150); // snap after 150ms of no wheel events
+        if (!rafId) snapToClosest();
+      }, 150);
     };
 
+  /* =======================
+    POINTER DRAG + FLICK
+  ======================= */
 
+  const DRAG_START_THRESHOLD = 6; // px before drag activates
+  const DEADZONE = FULL * 0.05;
 
+  const BASE_FLICK = FULL * 0.06;        // 🔑 exactly 1 panel
+  const STACK_FLICK = FULL * 0.6; // extra panels on rapid flicks
+  const STACK_WINDOW = 260;       // ms
+  const MAX_STACKS = 4;
 
-    /* =======================
-       POINTER DRAG
-    ======================= */
-    const onPointerDown = (e: PointerEvent) => {
+  let isPointerDown = false;
+  let isDragging = false;
+  let didDrag = false;
+
+  let pressX = 0;
+  let dragStartPosition = 0;
+  let lastFlickTime = 0;
+  let stackCount = 0;
+
+  const onPointerDown = (e: PointerEvent) => {
+    isPointerDown = true;
+    isDragging = false;
+    didDrag = false;
+
+    pressX = e.clientX;
+    dragStartPosition = position;
+
+    viewport.setPointerCapture(e.pointerId);
+  };
+
+  const onPointerMove = (e: PointerEvent) => {
+    if (!isPointerDown) return;
+
+    const dx = e.clientX - pressX;
+
+    // ⛔ wait until user actually drags
+    if (!isDragging) {
+      if (Math.abs(dx) < DRAG_START_THRESHOLD) return;
       isDragging = true;
-      startX = e.clientX;
-      lastX = position;
-      viewport.setPointerCapture(e.pointerId);
-    };
+      didDrag = true;
+    }
 
-    const onPointerMove = (e: PointerEvent) => {
-      if (!isDragging) return;
-      const delta = e.clientX - startX;
-      position = lastX - delta;
-      correctLoop();
-      applyTransform();
-    };
+    // direct world-space drag
+    position = dragStartPosition - dx *0.7;
+    correctLoop();
+    applyTransform();
+  };
 
-    const CLICK_THRESHOLD = 5; // pixels; small movement is still considered a click
+  const onPointerUp = (e: PointerEvent) => {
+    viewport.releasePointerCapture(e.pointerId);
+    isPointerDown = false;
 
-    const onPointerUp = (e: PointerEvent) => {
-      viewport.releasePointerCapture(e.pointerId);
+    // ✅ Pure click — no movement
+    if (!isDragging) {
+      snapToClosest();
+      return;
+    }
 
-      const movedDistance = Math.abs(position - lastX);
+    isDragging = false;
 
-      // Only snap if the user actually dragged
-      if (movedDistance > CLICK_THRESHOLD) {
-        snapToClosest();
-      }
+    const worldDelta = position - dragStartPosition;
 
-      isDragging = false;
-    };
+
+    // direction in world space
+    const direction = worldDelta > 0 ? 1 : -1;
+
+    // stack logic
+    const now = performance.now();
+    if (now - lastFlickTime < STACK_WINDOW) {
+      stackCount = Math.min(stackCount + 1, MAX_STACKS);
+    } else {
+      stackCount = 0;
+    }
+    lastFlickTime = now;
+
+    // 🔑 guaranteed first flick = 1 panel
+    velocity =
+      direction *
+      (BASE_FLICK + stackCount * STACK_FLICK);
+    kick();
+  };
+
+
+
+
 
     /* =======================
-       CLICK TO MOVE
+       CLICK
     ======================= */
-    const EDGE_THRESHOLD = 0.2; // 20% of viewport width
 
-    const onClick = (e: MouseEvent) => {
-      const clickX = e.clientX;
-      const currentViewportWidth = viewport.clientWidth;
-      const center = position + currentViewportWidth / 2 - bufferWidth;
-      let currentIndex = Math.round(center / FULL);
+    let edgeThreshold = 0.2;
+    const CLICK_IMPULSE = FULL * 0.2;
+    let lastClickTime = 0;
 
-      let delta = 0;
+  const onClick = (e: MouseEvent) => {
+    const vw = viewport.clientWidth;
+    const clickX = e.clientX;
+    const center = position + vw / 2 - bufferWidth;
+    const currentIndex = Math.round(center / FULL);
 
-      if (clickX < EDGE_THRESHOLD * currentViewportWidth) {
-        delta = -1; // move left
-      } else if (clickX > currentViewportWidth * (1 - EDGE_THRESHOLD)) {
-        delta = 1; // move right
-      } else {
-        return; // middle click → do nothing
-      }
+    const overlayOpen = openIndex !== null;
+    const overlayWidth = overlayRef.current?.offsetWidth ?? 0;
+    // Only use overlay width if overlay is actually open
+    const overlayEdgeThreshold = overlayOpen && overlayWidth > 0
+      ? (vw - overlayWidth) / 2 / vw
+      : 0.2;
 
-      // Special case: moving right from last panel
-      if (currentIndex === PANELS.length - 1 && delta === 1) {
-        // Animate to right buffer card
-        const bufferPosition = bufferWidth + PANELS.length * FULL - currentViewportWidth / 2 + FULL / 2 - GAP / 2;
-        track.style.transition = "transform 0.3s ease";
-        position = bufferPosition;
-        applyTransform();
+    edgeThreshold = overlayEdgeThreshold;
 
-        // After animation ends, teleport to the real first panel
-        setTimeout(() => {
-          track.style.transition = "none";
-          position = bufferWidth - currentViewportWidth / 2 + FULL / 2 - GAP / 2;
-          applyTransform();
-        }, 300);
+    const clickedCenter =
+      clickX > vw * edgeThreshold &&
+      clickX < vw * (1 - edgeThreshold);
 
-        return;
-      }
+    // Only open overlay if it’s centered AND not moving AND click is in the safe area
+  // Only open overlay if it's centered AND not moving AND overlay isn't open
+    if (!isMoving && clickedCenter && !overlayOpen) {
+      setOpenIndex(currentIndex);
+      return; // ✅ exit early, don't touch velocity or kick
+    }
 
-      // Special case: moving left from first panel
-      if (currentIndex === 0 && delta === -1) {
-        const bufferPosition = bufferWidth - FULL - currentViewportWidth / 2 + FULL / 2 - GAP / 2;
-        track.style.transition = "transform 0.3s ease";
-        position = bufferPosition;
-        applyTransform();
+    // Otherwise, treat click as edge flick only if overlay is closed
 
-        setTimeout(() => {
-          track.style.transition = "none";
-          position = bufferWidth + (PANELS.length - 1) * FULL - currentViewportWidth / 2 + FULL / 2 - GAP / 2;
-          applyTransform();
-        }, 300);
+    let delta = 0;
+    if (clickX < vw * edgeThreshold) delta = -0.8;
+    else if (clickX > vw * (1 - edgeThreshold)) delta = 0.8;
 
-        return;
-      }
+    if (delta !== 0) {
+      const now = Date.now();
+      velocity += delta * CLICK_IMPULSE * (now - lastClickTime < 300 ? 1.5 : 0.5);
+      lastClickTime = now;
+      kick();
+    }
 
-      // Normal click → move one panel
-      let nextIndex = (currentIndex + delta + PANELS.length) % PANELS.length;
-      const newPosition = bufferWidth + nextIndex * FULL - currentViewportWidth / 2 + FULL / 2 - GAP / 2;
+  };
 
-      track.style.transition = "transform 0.3s ease";
-      position = newPosition;
-      applyTransform();
 
-      setTimeout(() => {
-        track.style.transition = "none";
-      }, 300);
+    /* =======================
+       RESIZE
+    ======================= */
+
+    const onResize = () => {
+      if (centerIndexRef.current === null) return;
+      centerToIndex(centerIndexRef.current, false);
     };
-
-
-
 
     /* =======================
        LISTENERS
     ======================= */
+
     viewport.addEventListener("wheel", onWheel, { passive: false });
     viewport.addEventListener("pointerdown", onPointerDown);
     viewport.addEventListener("pointermove", onPointerMove);
     viewport.addEventListener("pointerup", onPointerUp);
     viewport.addEventListener("pointercancel", onPointerUp);
     viewport.addEventListener("click", onClick);
+    window.addEventListener("resize", onResize);
 
     return () => {
       viewport.removeEventListener("wheel", onWheel);
@@ -280,18 +361,44 @@ export default function Home() {
       viewport.removeEventListener("pointerup", onPointerUp);
       viewport.removeEventListener("pointercancel", onPointerUp);
       viewport.removeEventListener("click", onClick);
+      window.removeEventListener("resize", onResize);
     };
   }, []);
 
   return (
     <main className="viewport" ref={viewportRef}>
       <div className="track" ref={trackRef}>
-        {RENDERED_PANELS.map((panel, index) => (
-          <section className="panel" key={index}>
-            {panel}
-          </section>
-        ))}
+        {RENDERED_PANELS.map((panel, index) => {
+          const realIndex =
+            ((index - BUFFER_COUNT) % PANELS.length + PANELS.length) %
+            PANELS.length;
+
+          const isCenter = realIndex === centerIndex;
+
+          return (
+            <section key={index} className={`panel ${isCenter ? "is-center" : ""}`}>
+              <div className="panel-shell">
+                <div className="panel-main">
+                  <h2>{panel}</h2>
+                  <p>Short description or icons</p>
+                </div>
+
+              </div>
+            </section>
+
+          );
+        })}
       </div>
+
+      {openIndex !== null && (
+        <div className="overlay">
+          <div className="overlay-card" ref={overlayRef}>
+            <h2>{PANELS[openIndex]}</h2>
+            <p>Deep dive content goes here</p>
+            <button onClick={() => setOpenIndex(null)}>Close</button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
